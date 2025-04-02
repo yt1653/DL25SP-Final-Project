@@ -107,7 +107,7 @@ The exact formula of the parameter count will be determined at a later date.
 
 ### Set Up
 
-1. Follow [instruction](https://colab.research.google.com/drive/1OSj-Iyh9S91m4THjGsjf2wXkjmMnk4dx?usp=sharing) to set up HPC and singularity
+1. Follow [instruction](https://colab.research.google.com/drive/1W7l-Du9a2TJ0_WZRcmOgsIG04IjDqlKA?usp=sharing) to set up HPC and singularity
 2. Clone repo, `cd` into repo
 3. `pip install -r requirements.txt`
 
