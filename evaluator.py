@@ -116,12 +116,11 @@ class ProbingEvaluator:
                 # pred_encs = model(states=init_states, actions=batch.actions)
                 # pred_encs = pred_encs.transpose(0, 1)  # # BS, T, D --> T, BS, D
 
-                init_states = batch.states[:, 0:1]          # (B,1,C,H,W)
+                init_states = batch.states[:, 0:1]                     # (B,1,C,H,W)
                 pred_encs   = model(states=init_states,
-                                    actions=batch.actions)  # (B, T+1, D)
+                                    actions=batch.actions)             # (B, T+1, D)
 
-                pred_encs   = pred_encs[:, 1:]              # drop ŝ₀ → (B, T, D)
-                pred_encs   = pred_encs.permute(1, 0, 2)    # (T, B, D)
+                pred_encs   = pred_encs.permute(1, 0, 2)               # (T+1, B, D)
 
                 # Make sure pred_encs has shape (T, BS, D) at this point
                 ################################################################################
@@ -222,12 +221,11 @@ class ProbingEvaluator:
             # # # BS, T, D --> T, BS, D
             # pred_encs = pred_encs.transpose(0, 1)
 
-            init_states = batch.states[:, 0:1]          # (B,1,C,H,W)
+            init_states = batch.states[:, 0:1]                     # (B,1,C,H,W)
             pred_encs   = model(states=init_states,
-                                actions=batch.actions)  # (B, T+1, D)
+                                actions=batch.actions)             # (B, T+1, D)
 
-            pred_encs   = pred_encs[:, 1:]              # drop ŝ₀ → (B, T, D)
-            pred_encs   = pred_encs.permute(1, 0, 2)    # (T, B, D)
+            pred_encs   = pred_encs.permute(1, 0, 2)               # (T+1, B, D)
 
             # Make sure pred_encs has shape (T, BS, D) at this point
             ################################################################################
