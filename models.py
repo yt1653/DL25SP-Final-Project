@@ -77,14 +77,6 @@ class GRUPredictor(nn.Module):
 #### JEPA model ####
 
 class JEPAModel(nn.Module):
-    """
-    Forward signature expected by the evaluator:
-
-        • Training  : states  (B,T,C,H,W) + actions (B,T-1,Act)  →  (B,T,D)
-        • Inference : states  (B,1,C,H,W) + actions (B,T,  Act)  →  (B,T+1,D)
-
-      Inference returns S₀ (encoded) followed by T predictions.
-    """
     def __init__(
         self,
         in_ch:   int = 2,   # <-- new argument
@@ -98,15 +90,13 @@ class JEPAModel(nn.Module):
         self.repr_dim = state_dim
         self.device   = torch.device(device)
 
-        # online / target encoders
-        self.encoder        = ConvEncoder(state_dim)
-        self.target_encoder = ConvEncoder(state_dim)
+        # pass in_ch here, not the default 3:
+        self.encoder        = ConvEncoder(in_ch, state_dim)
+        self.target_encoder = ConvEncoder(in_ch, state_dim)
         self._ema_tau       = ema_tau
-        self._sync_target()               # weight copy
+        self._sync_target()
 
-        # predictor
         self.predictor = GRUPredictor(state_dim, act_dim, hidden_dim)
-
         self.to(self.device)
 
     # -------------------------- public API -------------------------- #
