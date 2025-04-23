@@ -58,6 +58,7 @@ def load_model():
         ema_tau=0.996,
         device="cuda" if torch.cuda.is_available() else "cpu",
     )
+    print("First conv expects", model.encoder.net[0].in_channels, "channels")
     return model
 
 
