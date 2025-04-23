@@ -18,26 +18,28 @@ def build_mlp(layers_dims: List[int]):
 #### Helper ####
 class ConvEncoder(nn.Module):
     """
-    64×64×3 -> 256-d embedding
+    Flexible CNN encoder.  Accepts arbitrary C,H,W and returns a
+    fixed-dim embedding via adaptive pooling, so you never worry
+    about exact spatial size.
     """
-    def __init__(self, out_dim: int = 256):
+    def __init__(self, in_ch: int, out_dim: int = 256):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(3,   32, 4, 2, 1),      # 32×32
+            nn.Conv2d(in_ch, 32, 3, 2, 1),   # (H/2)
             nn.ReLU(True),
-            nn.Conv2d(32,  64, 4, 2, 1),      # 16×16
+            nn.Conv2d(32, 64, 3, 2, 1),      # (H/4)
             nn.ReLU(True),
-            nn.Conv2d(64, 128, 4, 2, 1),      # 8×8
+            nn.Conv2d(64,128, 3, 2, 1),      # (H/8)
             nn.ReLU(True),
-            nn.Conv2d(128,256, 4, 2, 1),      # 4×4
+            nn.Conv2d(128,256,3, 2, 1),      # (H/16)
             nn.ReLU(True),
-            nn.Flatten(),                      # 4·4·256 = 4096
-            nn.Linear(4096, out_dim),
+            nn.AdaptiveAvgPool2d(1),         # (B,256,1,1)
+            nn.Flatten(),
+            nn.Linear(256, out_dim),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x : (B,C,H,W)
-        return self.net(x)                     # (B, out_dim)
+    def forward(self, x):
+        return self.net(x)
     
 
 #### Predictor ####
@@ -83,15 +85,13 @@ class JEPAModel(nn.Module):
 
       Inference returns S₀ (encoded) followed by T predictions.
     """
-    def __init__(
-        self,
-        img_size: Tuple[int,int]=(64,64),
-        act_dim: int = 2,
-        state_dim: int = 256,
-        hidden_dim: int = 512,
-        ema_tau: float = 0.996,
-        device: Optional[str] = "cuda",
-    ):
+    def __init__(self,
+                 in_ch:   int = 2,        # <-- NEW
+                 act_dim: int = 2,
+                 state_dim: int = 256,
+                 hidden_dim: int = 512,
+                 ema_tau: float = 0.996,
+                 device:   str = "cuda"):
         super().__init__()
         self.repr_dim = state_dim
         self.device   = torch.device(device)

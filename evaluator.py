@@ -133,7 +133,7 @@ class ProbingEvaluator:
 
                 losses_list = []
 
-                target = getattr(batch, "locations").cuda()
+                target = getattr(batch, "locations").to(self.device)
                 target = self.normalizer.normalize_location(target)
 
                 if (

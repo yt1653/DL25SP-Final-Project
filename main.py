@@ -49,12 +49,14 @@ def load_model():
     """Load or initialize the model."""
     # TODO: Replace MockModel with your trained model
     # model = MockModel()
+    in_channels = 2
     model = JEPAModel(
+        in_ch=in_channels,
         act_dim=2,
         state_dim=256,
         hidden_dim=512,
         ema_tau=0.996,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device="cpu",         # or "cuda"
     )
     return model
 
