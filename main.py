@@ -51,12 +51,12 @@ def load_model():
     # model = MockModel()
     in_channels = 2
     model = JEPAModel(
-        in_ch=in_channels,
+        in_ch=2,                # matches your dataset
         act_dim=2,
         state_dim=256,
         hidden_dim=512,
         ema_tau=0.996,
-        device="cpu",         # or "cuda"
+        device="cuda" if torch.cuda.is_available() else "cpu",
     )
     return model
 

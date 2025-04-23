@@ -19,27 +19,27 @@ def build_mlp(layers_dims: List[int]):
 class ConvEncoder(nn.Module):
     """
     Flexible CNN encoder.  Accepts arbitrary C,H,W and returns a
-    fixed-dim embedding via adaptive pooling, so you never worry
-    about exact spatial size.
+    fixed-dim embedding via adaptive pooling.
     """
     def __init__(self, in_ch: int, out_dim: int = 256):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(in_ch, 32, 3, 2, 1),   # (H/2)
+            nn.Conv2d(in_ch,  32, 3, 2, 1),   # now uses in_ch, not hard-coded 3
             nn.ReLU(True),
-            nn.Conv2d(32, 64, 3, 2, 1),      # (H/4)
+            nn.Conv2d(32,     64, 3, 2, 1),
             nn.ReLU(True),
-            nn.Conv2d(64,128, 3, 2, 1),      # (H/8)
+            nn.Conv2d(64,    128, 3, 2, 1),
             nn.ReLU(True),
-            nn.Conv2d(128,256,3, 2, 1),      # (H/16)
+            nn.Conv2d(128,   256, 3, 2, 1),
             nn.ReLU(True),
-            nn.AdaptiveAvgPool2d(1),         # (B,256,1,1)
+            nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.Linear(256, out_dim),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
     
 
 #### Predictor ####
@@ -85,13 +85,15 @@ class JEPAModel(nn.Module):
 
       Inference returns S₀ (encoded) followed by T predictions.
     """
-    def __init__(self,
-                 in_ch:   int = 2,        # <-- NEW
-                 act_dim: int = 2,
-                 state_dim: int = 256,
-                 hidden_dim: int = 512,
-                 ema_tau: float = 0.996,
-                 device:   str = "cuda"):
+    def __init__(
+        self,
+        in_ch:   int = 2,   # <-- new argument
+        act_dim: int = 2,
+        state_dim: int = 256,
+        hidden_dim: int = 512,
+        ema_tau: float = 0.996,
+        device:   str = "cuda",
+    ):
         super().__init__()
         self.repr_dim = state_dim
         self.device   = torch.device(device)
