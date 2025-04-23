@@ -1,7 +1,8 @@
 from dataset import create_wall_dataloader
 from evaluator import ProbingEvaluator
 import torch
-from models import MockModel
+# from models import MockModel
+from models import JEPAModel
 import glob
 
 
@@ -47,7 +48,14 @@ def load_data(device):
 def load_model():
     """Load or initialize the model."""
     # TODO: Replace MockModel with your trained model
-    model = MockModel()
+    # model = MockModel()
+    model = JEPAModel(
+        act_dim=2,
+        state_dim=256,
+        hidden_dim=512,
+        ema_tau=0.996,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+    )
     return model
 
 
