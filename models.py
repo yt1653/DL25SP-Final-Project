@@ -1,3 +1,6 @@
+#### MiniConv GRU-JEPA (VicReg - 256)####
+
+
 from typing import List, Tuple, Optional
 import numpy as np
 from torch import nn
