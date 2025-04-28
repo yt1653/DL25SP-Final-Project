@@ -20,19 +20,23 @@ def build_mlp(layers_dims: List[int]):
 
 #### Helper ####
 class ConvEncoder(nn.Module):
-    """Keep 16×16 spatial map so we don’t quantise away sub-pixel detail."""
     def __init__(self, in_ch: int, state_dim: int = 64):
         super().__init__()
-        self.conv = nn.Sequential(                # 65×65 → 16×16
-            nn.Conv2d(in_ch, 16, 3, 2, 1), nn.ReLU(True),   # 33×33
-            nn.Conv2d(16, 32, 3, 2, 1), nn.ReLU(True),      # 17×17
-            nn.Conv2d(32, 32, 3, 1, 0), nn.ReLU(True),      # 15×15
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, 16, 3, 2, 1), nn.ReLU(True),   # 65 → 33
+            nn.Conv2d(16, 32, 3, 2, 1), nn.ReLU(True),      # 33 → 17
+            nn.Conv2d(32, 32, 3, 1, 1), nn.ReLU(True),      # keep 17
         )
-        self.head = nn.Linear(32 * 16 * 16, state_dim)
+        # ↓↓↓ NEW: adaptive pool to a fixed 4×4 grid (works for any H,W) ↓↓↓
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool2d((4, 4)),                  # 17 → 4
+            nn.Flatten(),                                  # 32·4·4 = 512
+            nn.Linear(32 * 4 * 4, state_dim),
+        )
 
     def forward(self, x):
         f = self.conv(x)
-        return self.head(f.flatten(1))
+        return self.head(f)
 
     
 
