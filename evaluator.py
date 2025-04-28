@@ -230,7 +230,7 @@ class ProbingEvaluator:
             # Make sure pred_encs has shape (T, BS, D) at this point
             ################################################################################
 
-            target = getattr(batch, "locations").cuda()
+            target = getattr(batch, "locations").to(self.device)
             target = self.normalizer.normalize_location(target)
 
             pred_locs = torch.stack([prober(x) for x in pred_encs], dim=1)

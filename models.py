@@ -1,4 +1,4 @@
-#### MiniConv GRU-JEPA (VicReg - 256)####
+####  ####
 
 
 from typing import List, Tuple, Optional
@@ -20,61 +20,38 @@ def build_mlp(layers_dims: List[int]):
 
 #### Helper ####
 class ConvEncoder(nn.Module):
-    """
-    Flexible CNN encoder.  Accepts arbitrary C,H,W and returns a
-    fixed-dim embedding via adaptive pooling.
-    """
-    def __init__(self, in_ch: int, out_dim: int = 256):
+    def __init__(self, in_ch: int, out_dim: int = 512):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(in_ch,  32, 3, 2, 1),   # now uses in_ch, not hard-coded 3
-            nn.ReLU(True),
-            nn.Conv2d(32,     64, 3, 2, 1),
-            nn.ReLU(True),
-            nn.Conv2d(64,    128, 3, 2, 1),
-            nn.ReLU(True),
-            nn.Conv2d(128,   256, 3, 2, 1),
-            nn.ReLU(True),
+            nn.Conv2d(in_ch,  32, 3, 2, 1), nn.ReLU(True),
+            nn.Conv2d(32,     64, 3, 2, 1), nn.ReLU(True),
+            nn.Conv2d(64,    128, 3, 2, 1), nn.ReLU(True),
+            nn.Conv2d(128,   256, 3, 2, 1), nn.ReLU(True),
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.Linear(256, out_dim),
         )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):                       # (B,C,H,W) → (B,D)
         return self.net(x)
 
     
 
 #### Predictor ####
 class GRUPredictor(nn.Module):
-    def __init__(self, state_dim: int, act_dim: int, hidden_dim: int = 512):
+    def __init__(self, state_dim: int, act_dim: int, hidden: int = 1024):
         super().__init__()
-        self.input_dim = state_dim + act_dim
-        self.gru = nn.GRUCell(self.input_dim, hidden_dim)
-        self.lin = nn.Linear(hidden_dim, state_dim)
+        self.gru = nn.GRUCell(state_dim + act_dim, hidden)
+        self.lin = nn.Linear(hidden, state_dim)
 
-    def forward(
-        self,
-        prev_state: torch.Tensor,   # (B, D)
-        action_seq: torch.Tensor,   # (B, T, A)
-    ) -> torch.Tensor:
-        """
-        Roll the GRU for T steps and return predicted states:
-            out[:,t] = Ŝ_{t}
-        Shapes:
-            prev_state : (B,D)   given S_0   (encoder on o_0)
-            action_seq : (B,T,A)  u_0 … u_{T-1}
-            returns    : (B,T,D)
-        """
-        B, T, _ = action_seq.shape
-        h = prev_state.new_zeros(B, self.gru.hidden_size)
-        z = []
+    def forward(self, s0, acts):                # s0: (B,D)  acts: (B,T,A)
+        B, T, _ = acts.shape
+        h = s0.new_zeros(B, self.gru.hidden_size)
+        out = []
         for t in range(T):
-            inp = torch.cat([prev_state, action_seq[:, t]], dim=-1)
-            h = self.gru(inp, h)
-            prev_state = self.lin(h)          # Ŝ_{t+1}
-            z.append(prev_state)
-        return torch.stack(z, dim=1)          # (B,T,D)
+            h = self.gru(torch.cat([s0, acts[:, t]], -1), h)
+            s0 = self.lin(h)
+            out.append(s0)
+        return torch.stack(out, 1)              # (B,T,D)
 
 
 #### JEPA model ####
@@ -82,99 +59,68 @@ class GRUPredictor(nn.Module):
 class JEPAModel(nn.Module):
     def __init__(
         self,
-        in_ch:   int = 2,   # <-- new argument
-        act_dim: int = 2,
-        state_dim: int = 256,
-        hidden_dim: int = 512,
-        ema_tau: float = 0.996,
-        device:   str = "cuda",
+        in_ch:      int  = 2,
+        act_dim:    int  = 2,
+        state_dim:  int  = 512,
+        hidden_dim: int  = 1024,
+        ema_tau:    float= 0.996,
+        device:     str  = "cuda",
     ):
         super().__init__()
         self.repr_dim = state_dim
         self.device   = torch.device(device)
 
-        # pass in_ch here, not the default 3:
         self.encoder        = ConvEncoder(in_ch, state_dim)
         self.target_encoder = ConvEncoder(in_ch, state_dim)
-        self._ema_tau       = ema_tau
-        self._sync_target()
+        self.predictor      = GRUPredictor(state_dim, act_dim, hidden_dim)
 
-        self.predictor = GRUPredictor(state_dim, act_dim, hidden_dim)
+        self._ema_tau = ema_tau
+        self._sync_target()
         self.to(self.device)
 
-    # -------------------------- public API -------------------------- #
-    def forward(self, states: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
-        """
-        See docstring above for expected behaviour.
-        """
-        if states.size(1) > 1:                                # === training ===
-            return self._forward_train(states, actions)
-        else:                                                 # === inference ===
-            return self._forward_rollout(states, actions)
+    # ------------ public forward (used only by evaluator) -----------
+    def forward(self, states, actions):         # see evaluator contract
+        if states.size(1) == 1:
+            return self._rollout(states, actions)
+        else:
+            return self._teacher_force(states, actions)
 
-    # ---------------------- training (teacher-forcing) -------------- #
-    def _forward_train(self, states: torch.Tensor, actions: torch.Tensor):
-        """
-        states  : (B,T,C,H,W)   with T ≥ 2
-        actions : (B,T-1,A)
-        return  : (B,T,D)       [ŝ₀ (= enc(o₀)), Ŝ₁ … Ŝ_{T-1}]
-        """
+    # ------------ teacher-forcing (for pre-training) ----------------
+    def _teacher_force(self, states, actions):
         B, T, *_ = states.shape
-        # encode all observations with *online* encoder (teacher forcing):
-        s_online = self.encoder(states.flatten(0,1)).view(B, T, -1)  # (B,T,D)
+        s_all = self.encoder(states.flatten(0,1)).view(B, T, -1)
+        preds = self.predictor(s_all[:,0], actions)      # (B,T-1,D)
+        return torch.cat([s_all[:, :1], preds], 1)       # (B,T,D)
 
-        # first state is ground-truth embedding of o₀
-        s0 = s_online[:, 0]                          # (B,D)
-        preds = self.predictor(s0, actions)          # (B,T-1,D)
-        preds = torch.cat([s0.unsqueeze(1), preds], dim=1)  # prepend ŝ₀
-        return preds
-
-    # -------------------- inference (single obs + actions) ---------- #
+    # ------------ inference / rollout (evaluator uses this) ---------
     @torch.no_grad()
-    def _forward_rollout(self, states: torch.Tensor, actions: torch.Tensor):
-        """
-        states  : (B,1,C,H,W)   (only o₀)
-        actions : (B,T,A)
-        return  : (B,T+1,D) = [ŝ₀, Ŝ₁ … Ŝ_T]
-        """
+    def _rollout(self, states, actions):
         B = states.size(0)
-        s0 = self.encoder(states[:,0]).view(B,-1)      # (B,D)
-        preds = self.predictor(s0, actions)            # (B,T,D)
-        return torch.cat([s0.unsqueeze(1), preds], dim=1)
+        s0 = self.encoder(states[:,0])
+        preds = self.predictor(s0, actions)              # (B,T,D)
+        return torch.cat([s0.unsqueeze(1), preds], 1)    # (B,T+1,D)
 
-    # ------------------------ anti-collapse loss -------------------- #
-    def jepa_loss(
-        self,
-        online_preds: torch.Tensor,   # (B,T,D) from encoder+predictor (online)
-        target_states: torch.Tensor,  # (B,T,D) from *target* encoder
-        lambda_var: float = 25.0,
-        lambda_cov: float = 1.0,
-    ):
-        """
-        VicReg-style: invariance + variance + covariance.
-        """
-        B, T, D = online_preds.shape
-        # invariance (MSE)
-        loss_inv = F.mse_loss(online_preds, target_states)
+    # ------------ VicReg-style loss (call from your train loop) -----
+    def jepa_loss(self, online, target, λvar=25., λcov=1.):
+        mse = F.mse_loss(online, target)
 
-        # reshape to (B·T , D)
-        z = online_preds.reshape(-1, D)
-        std = torch.sqrt(z.var(dim=0) + 1e-04)
-        loss_var = torch.clamp(1.0 - std, min=0).mean()
+        z = online.reshape(-1, online.size(-1))
+        std = torch.sqrt(z.var(0) + 1e-4)
+        var_loss = torch.clamp(1.-std, min=0).mean()
 
-        zc = z - z.mean(dim=0)
-        cov = (zc.T @ zc) / (B*T - 1)          # (D,D)
-        off_diag = cov.flatten()[
-            1:].view(D - 1, D + 1)[:, :-1].flatten()
-        loss_cov = (off_diag**2).mean()
+        zc = z - z.mean(0)
+        cov = (zc.T @ zc)/(z.shape[0]-1)
+        off = cov.flatten()[1:].view(cov.size(0)-1, cov.size(1)+1)[:,:-1]
+        cov_loss = (off**2).mean()
 
-        return loss_inv + lambda_var*loss_var + lambda_cov*loss_cov
+        return mse + λvar*var_loss + λcov*cov_loss
 
-    # ------------------- EMA target encoder utilities --------------- #
+    # ------------ momentum update helpers ---------------------------
     @torch.no_grad()
-    def update_target(self):
+    def update_target(self, tau=None):
+        tau = tau or self._ema_tau
         for p, tp in zip(self.encoder.parameters(), self.target_encoder.parameters()):
-            tp.data = tp.data * self._ema_tau + p.data * (1.0 - self._ema_tau)
+            tp.data.lerp_(p.data, 1. - tau)
 
     @torch.no_grad()
     def _sync_target(self):

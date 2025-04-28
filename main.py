@@ -4,6 +4,7 @@ import torch
 # from models import MockModel
 from models import JEPAModel
 import glob
+import math
 
 
 def get_device():
@@ -12,6 +13,10 @@ def get_device():
     print("Using device:", device)
     return device
 
+def _cosine_tau(step, total, base=0.996, final=0.9995):
+    """Smooth EMA schedule for the momentum (BYOL style)."""
+    p = step / total
+    return final - (final - base) * 0.5 * (1 + math.cos(math.pi * p))
 
 def load_data(device):
     data_path = "/scratch/DL25SP"
@@ -51,14 +56,60 @@ def load_model():
     # model = MockModel()
     in_channels = 2
     model = JEPAModel(
-        in_ch=2,                # matches your dataset
-        act_dim=2,
-        state_dim=256,
-        hidden_dim=512,
-        ema_tau=0.996,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        in_ch      = 2,
+        act_dim    = 2,
+        state_dim  = 512,
+        hidden_dim = 1024,
+        ema_tau    = 0.996,
+        device     = device,
     )
-    print("First conv expects", model.encoder.net[0].in_channels, "channels")
+    STEPS      = 10_000          # shorten if you want a very fast test
+    BATCH_SIZE = 64
+    LR         = 3e-4
+
+    # use the exploration dataset, not the probe sets
+    train_loader = create_wall_dataloader(
+        data_path="/scratch/DL25SP/train",
+        probing=False, device=device, train=True,
+    )
+
+    opt      = torch.optim.AdamW(model.parameters(), lr=LR)
+    iterator = iter(train_loader)
+    progress = tqdm(range(STEPS), desc="JEPA pre-train")
+
+    model.train()
+    for step in progress:
+        try:
+            batch = next(iterator)
+        except StopIteration:
+            iterator = iter(train_loader)
+            batch = next(iterator)
+
+        states  = batch.states.to(device)      # (B,T,C,H,W)
+        actions = batch.actions.to(device)     # (B,T-1,2)
+
+        # teacher-forcing forward
+        online  = model._teacher_force(states, actions)
+
+        with torch.no_grad():
+            tgt = model.target_encoder(
+                    states.flatten(0,1)).view_as(online)
+
+        loss = model.jepa_loss(online, tgt)
+
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        opt.step()
+
+        # EMA momentum update
+        tau = _cosine_tau(step, STEPS)
+        model.update_target(tau)
+
+        if step % 500 == 0:
+            progress.set_postfix(loss=f"{loss.item():.4f}")
+
+    model.eval()               # switch back for probing
     return model
 
 
