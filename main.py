@@ -1,3 +1,4 @@
+from tqdm.auto import tqdm
 from dataset import create_wall_dataloader
 from evaluator import ProbingEvaluator
 import torch
@@ -50,7 +51,7 @@ def load_data(device):
     return probe_train_ds, probe_val_ds
 
 
-def load_model():
+def load_model(device):
     """Load or initialize the model."""
     # TODO: Replace MockModel with your trained model
     # model = MockModel()
@@ -132,7 +133,7 @@ def evaluate_model(device, model, probe_train_ds, probe_val_ds):
 
 if __name__ == "__main__":
     device = get_device()
-    model = load_model()
+    model = load_model(device)
     
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total Trainable Parameters: {total_params:,}")

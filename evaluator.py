@@ -156,7 +156,7 @@ class ProbingEvaluator:
                         sampled_target_locs[i, :] = target[i, indices]
 
                     pred_encs = sampled_pred_encs
-                    target = sampled_target_locs.cuda()
+                    target = sampled_target_locs.to(self.device)
 
                 pred_locs = torch.stack([prober(x) for x in pred_encs], dim=1)
                 losses = location_losses(pred_locs, target)
