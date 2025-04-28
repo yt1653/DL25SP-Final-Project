@@ -20,39 +20,39 @@ def build_mlp(layers_dims: List[int]):
 
 #### Helper ####
 class ConvEncoder(nn.Module):
-    def __init__(self, in_ch: int, out_dim: int = 512):
+    """Keep 16×16 spatial map so we don’t quantise away sub-pixel detail."""
+    def __init__(self, in_ch: int, state_dim: int = 64):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_ch,  32, 3, 2, 1), nn.ReLU(True),
-            nn.Conv2d(32,     64, 3, 2, 1), nn.ReLU(True),
-            nn.Conv2d(64,    128, 3, 2, 1), nn.ReLU(True),
-            nn.Conv2d(128,   256, 3, 2, 1), nn.ReLU(True),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(256, out_dim),
+        self.conv = nn.Sequential(                # 65×65 → 16×16
+            nn.Conv2d(in_ch, 16, 3, 2, 1), nn.ReLU(True),   # 33×33
+            nn.Conv2d(16, 32, 3, 2, 1), nn.ReLU(True),      # 17×17
+            nn.Conv2d(32, 32, 3, 1, 0), nn.ReLU(True),      # 15×15
         )
-    def forward(self, x):                       # (B,C,H,W) → (B,D)
-        return self.net(x)
+        self.head = nn.Linear(32 * 16 * 16, state_dim)
+
+    def forward(self, x):
+        f = self.conv(x)
+        return self.head(f.flatten(1))
 
     
 
 #### Predictor ####
 class GRUPredictor(nn.Module):
-    def __init__(self, state_dim: int, act_dim: int, hidden: int = 1024):
+    """tiny predictor – 64-d hidden, 2 k params total"""
+    def __init__(self, d=64, act=2, h=64):
         super().__init__()
-        self.gru = nn.GRUCell(state_dim + act_dim, hidden)
-        self.lin = nn.Linear(hidden, state_dim)
+        self.rnn = nn.GRUCell(d + act, h)
+        self.out = nn.Linear(h, d)
 
-    def forward(self, s0, acts):                # s0: (B,D)  acts: (B,T,A)
-        B, T, _ = acts.shape
-        h = s0.new_zeros(B, self.gru.hidden_size)
-        out = []
+    def forward(self, s0, a):
+        B, T, _ = a.shape
+        h = s0.new_zeros(B, self.rnn.hidden_size)
+        outs = []
         for t in range(T):
-            h = self.gru(torch.cat([s0, acts[:, t]], -1), h)
-            s0 = self.lin(h)
-            out.append(s0)
-        return torch.stack(out, 1)              # (B,T,D)
-
+            h = self.rnn(torch.cat([s0, a[:, t]], -1), h)
+            s0 = self.out(h)
+            outs.append(s0)
+        return torch.stack(outs, 1)
 
 #### JEPA model ####
 

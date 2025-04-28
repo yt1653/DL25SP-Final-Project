@@ -7,6 +7,8 @@ from models import JEPAModel
 import glob
 import math
 
+ROLL = 1
+
 
 def get_device():
     """Check for GPU availability."""
@@ -55,62 +57,35 @@ def load_model(device):
     """Load or initialize the model."""
     # TODO: Replace MockModel with your trained model
     # model = MockModel()
-    in_channels = 2
-    model = JEPAModel(
-        in_ch      = 2,
-        act_dim    = 2,
-        state_dim  = 512,
-        hidden_dim = 1024,
-        ema_tau    = 0.996,
-        device     = device,
-    )
-    STEPS      = 10_00          # shorten if you want a very fast test
-    BATCH_SIZE = 64
-    LR         = 3e-4
+    model = JEPAModel(in_ch=2, act_dim=2, state_dim=64,
+                      hidden_dim=64, device=device, ema_tau=0.995)
 
-    # use the exploration dataset, not the probe sets
-    train_loader = create_wall_dataloader(
-        data_path="/scratch/DL25SP/train",
-        probing=False, device=device, train=True,
-    )
-
-    opt      = torch.optim.AdamW(model.parameters(), lr=LR)
-    iterator = iter(train_loader)
-    progress = tqdm(range(STEPS), desc="JEPA pre-train")
-
+    loader = create_wall_dataloader("/scratch/DL25SP/train",
+                                    probing=False, device=device, train=True)
+    opt = torch.optim.Adam(model.parameters(), 3e-4)
+    iterator = iter(loader)
     model.train()
-    for step in progress:
-        try:
-            batch = next(iterator)
+
+    for step in tqdm(range(2_000), desc="pre-train"):
+        try: batch = next(iterator)
         except StopIteration:
-            iterator = iter(train_loader)
-            batch = next(iterator)
+            iterator = iter(loader); batch = next(iterator)
 
-        states  = batch.states.to(device)      # (B,T,C,H,W)
-        actions = batch.actions.to(device)     # (B,T-1,2)
+        s, a = batch.states.to(device), batch.actions.to(device)
 
-        # teacher-forcing forward
-        online  = model._teacher_force(states, actions)
+        # teacher forcing for t ≥ 1, rollout 1 step:
+        online0 = model._teacher_force(s[:, :-ROLL], a[:, :-ROLL])
+        roll    = model(s[:, :1], a[:, :ROLL])        # predict 1 step
+        online  = torch.cat([roll, online0[:, 1:]], 1)
 
         with torch.no_grad():
-            tgt = model.target_encoder(
-                    states.flatten(0,1)).view_as(online)
+            tgt = model.target_encoder(s.flatten(0,1)).view_as(online)
 
         loss = model.jepa_loss(online, tgt)
+        opt.zero_grad(); loss.backward(); opt.step()
+        model.update_target()
 
-        opt.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step()
-
-        # EMA momentum update
-        tau = _cosine_tau(step, STEPS)
-        model.update_target(tau)
-
-        if step % 500 == 0:
-            progress.set_postfix(loss=f"{loss.item():.4f}")
-
-    model.eval()               # switch back for probing
+    model.eval()
     return model
 
 
