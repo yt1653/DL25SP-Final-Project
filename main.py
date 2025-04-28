@@ -64,7 +64,7 @@ def load_model(device):
         ema_tau    = 0.996,
         device     = device,
     )
-    STEPS      = 10_000          # shorten if you want a very fast test
+    STEPS      = 10_00          # shorten if you want a very fast test
     BATCH_SIZE = 64
     LR         = 3e-4
 
