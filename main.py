@@ -66,7 +66,7 @@ def load_model(device):
     iterator = iter(loader)
     model.train()
 
-    for step in tqdm(range(2_000), desc="pre-train"):
+    for step in tqdm(range(1_000), desc="pre-train"):
         try: batch = next(iterator)
         except StopIteration:
             iterator = iter(loader); batch = next(iterator)
