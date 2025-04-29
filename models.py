@@ -46,23 +46,31 @@ class ConvGRUPredictor(nn.Module):
 
     def forward(self, s0, actions):
         """
-        s0      : (B,32,16,16)  initial encoded feature map
-        actions : (B,T,2)       delta-xy for each step
+        s0      : (B,32,16,16)  initial feature map from encoder
+        actions : (B,T,2)       Δx,Δy for each step
         returns : (B,T,32,16,16)
         """
         B, T, _ = actions.shape
-        h = torch.zeros(B, self.gru.hidden_size, device=s0.device)  # keep state
+        h = torch.zeros(B, self.gru.hidden_size, device=s0.device)  # hidden state
         f = s0
         outs = []
         for t in range(T):
-            # project action into a 16×16 plane and concat to feature map
             act_plane = self.act_proj(actions[:, t]).view(B, 1, 16, 16)
-            x = torch.cat([f, act_plane], 1)                        # (B,33,16,16)
-            h = self.gru(x.flatten(2).transpose(1, 2), h)           # (B,hidden)
-            f = self.out(h.unsqueeze(-1).unsqueeze(-1)              # → (B,hidden,1,1)
-                           .expand(-1, -1, 16, 16))                 # broadcast
+            x = torch.cat([f, act_plane], 1)            # (B,33,16,16)
+
+            # ---- convert spatial map to a 2-D vector (B,33) ----
+            z = x.flatten(2).mean(2)                    # (B,33)
+
+            # ---- recurrent update --------------------------------
+            h = self.gru(z, h)                          # (B,hidden)
+
+            # ---- broadcast hidden back to spatial map ------------
+            f = self.out(h.unsqueeze(-1).unsqueeze(-1)  # (B,hidden,1,1)
+                           .expand(-1, -1, 16, 16))     # (B,32,16,16)
+
             outs.append(f)
-        return torch.stack(outs, 1)                                 # (B,T,32,16,16)
+
+        return torch.stack(outs, 1)                     # (B,T,32,16,16)
 
 #### JEPA model ####
 
