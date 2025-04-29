@@ -58,10 +58,11 @@ class ConvGRUPredictor(nn.Module):
 
 class JEPAModel(nn.Module):
     def __init__(self, in_ch=2, act_dim=2,
-                 ch=32, hidden_ch=128, repr_dim=64,
-                 ema_tau=0.996, device="cpu"):
+                ch=32, hidden_ch=128, repr_dim=64,
+                ema_tau=0.996, device="cpu"):
         super().__init__()
         self.device = torch.device(device)
+        self.ch = ch
         self.encoder = SpatialEncoder(in_ch, ch).to(self.device)
         self.target_encoder = SpatialEncoder(in_ch, ch).to(self.device)
         self.predictor = ConvGRUPredictor(ch, act_dim, hidden_ch).to(self.device)
@@ -105,7 +106,7 @@ class JEPAModel(nn.Module):
         enc = self._encode(states.flatten(0,1)).view(B, T, -1, 16, 16)
         preds = self.predictor(enc[:, 0], actions)           # (B,T-1,…)
         full  = torch.cat([enc[:, :1], preds], 1)            # (B,T,…)
-        vecs  = self._to_vec(full.view(-1, 32, 16, 16))
+        vecs  = self._to_vec(full.view(-1, self.ch, 16, 16))
         return vecs.view(B, T, -1)
 
     @torch.no_grad()
@@ -114,7 +115,7 @@ class JEPAModel(nn.Module):
         f0 = self._encode(states[:,0])
         preds = self.predictor(f0, actions)      # (B,T,32,16,16)
         full = torch.cat([f0.unsqueeze(1), preds], 1)      # (B,T+1,32,16,16)
-        return self._to_vec(full.view(-1,32,16,16)).view(B, -1, self.repr_dim)
+        return self._to_vec(full.view(-1,self.ch,16,16)).view(B, -1, self.repr_dim)
 
     def forward(self, states, actions):
         if states.size(1) == 1:      # inference
