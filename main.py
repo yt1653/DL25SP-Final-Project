@@ -98,7 +98,7 @@ def load_model(device):
         opt.step()
         model.update_target()
 
-        if step % 1000 == 0:                         # print every 1 000 updates
+        if step % 800 == 0:                         # print every 1 000 updates
             print(f"[step {step:>5}] pre-train VicReg loss = {loss.item():.4f}",
                 flush=True)                        # flush to ensure it appears
 
