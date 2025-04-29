@@ -66,9 +66,15 @@ def load_model(device):
         return final - (final - base) * 0.5 * (1 + math.cos(math.pi * p))
 
     # build tiny model
-    model = JEPAModel(in_ch=2, act_dim=2,
-                      state_dim=64, hidden_dim=64,
-                      ema_tau=0.995, device=device)
+    model = JEPAModel(
+        in_ch=2,           # unchanged
+        act_dim=2,         # unchanged
+        ch=32,             # encoder + predictor channel width
+        hidden_ch=64,      # GRU hidden size   (was hidden_dim)
+        repr_dim=64,       # vector size fed to the prober (was state_dim)
+        ema_tau=0.995,
+        device=device,
+    )
 
     # if checkpoint exists – just load it
     if os.path.exists(CKPT_FILE):
