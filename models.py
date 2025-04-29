@@ -20,30 +20,43 @@ def build_mlp(layers_dims: List[int]):
 
 #### Helper ####
 class ConvEncoder(nn.Module):
-    def __init__(self, in_ch: int, state_dim: int = 64):
+    """Two conv layers + soft-argmax → (x,y,vx,vy)  (repr_dim = 4)"""
+    def __init__(self, in_ch: int, state_dim: int = 4):
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_ch, 16, 3, 2, 1), nn.ReLU(True),   # 65 → 33
-            nn.Conv2d(16, 32, 3, 2, 1), nn.ReLU(True),      # 33 → 17
-            nn.Conv2d(32, 32, 3, 1, 1), nn.ReLU(True),      # keep 17
+        self.feat = nn.Sequential(
+            nn.Conv2d(in_ch, 32, 5, 2, 2), nn.ReLU(True),   # 65→33
+            nn.Conv2d(32, 32, 3, 1, 1), nn.ReLU(True),      # 33
         )
-        # ↓↓↓ NEW: adaptive pool to a fixed 4×4 grid (works for any H,W) ↓↓↓
-        self.head = nn.Sequential(
-            nn.AdaptiveAvgPool2d((4, 4)),                  # 17 → 4
-            nn.Flatten(),                                  # 32·4·4 = 512
-            nn.Linear(32 * 4 * 4, state_dim),
-        )
+        # coordinate grid buffers
+        yy, xx = torch.meshgrid(
+            torch.linspace(0, 1, 33),
+            torch.linspace(0, 1, 33),
+            indexing="ij")
+        self.register_buffer("xx", xx)     # (33,33)
+        self.register_buffer("yy", yy)
+
+        # linear head to get velocity
+        self.head_v = nn.Linear(32, 2)     # vx,vy
 
     def forward(self, x):
-        f = self.conv(x)
-        return self.head(f)
+        f = self.feat(x)                   # (B,32,33,33)
+        # soft-argmax for position
+        heat = f.mean(1)                  # (B,33,33)
+        p = heat.flatten(1).softmax(-1).view_as(heat)
+        x_cm = (p * self.xx).sum((1,2))
+        y_cm = (p * self.yy).sum((1,2))
+        # take deepest feature vec at peak to estimate velocity
+        idx = p.flatten(1).argmax(-1)                    # (B,)
+        feats = f.flatten(2).transpose(1,2)              # (B, 33*33, 32)
+        v = self.head_v(feats[torch.arange(len(x)), idx])# (B,2)
+        return torch.cat([x_cm, y_cm, v], -1)            # (B,4)
 
     
 
 #### Predictor ####
 class GRUPredictor(nn.Module):
-    """tiny predictor – 64-d hidden, 2 k params total"""
-    def __init__(self, d=64, act=2, h=64):
+    """tiny predictor – 64-hidden, ~2k params"""
+    def __init__(self, d=4, act=2, h=64):   # ← d becomes 4
         super().__init__()
         self.rnn = nn.GRUCell(d + act, h)
         self.out = nn.Linear(h, d)
@@ -71,12 +84,13 @@ class JEPAModel(nn.Module):
         device:     str  = "cuda",
     ):
         super().__init__()
-        self.repr_dim = state_dim
         self.device   = torch.device(device)
 
+        state_dim = 4
         self.encoder        = ConvEncoder(in_ch, state_dim)
         self.target_encoder = ConvEncoder(in_ch, state_dim)
-        self.predictor      = GRUPredictor(state_dim, act_dim, hidden_dim)
+        self.predictor = GRUPredictor(state_dim, act_dim, hidden_dim)
+        self.repr_dim  = state_dim
 
         self._ema_tau = ema_tau
         self._sync_target()

@@ -7,8 +7,6 @@ from models import JEPAModel
 import glob
 import math
 
-ROLL = 1
-
 
 def get_device():
     """Check for GPU availability."""
@@ -66,7 +64,10 @@ def load_model(device):
     iterator = iter(loader)
     model.train()
 
-    for step in tqdm(range(1_000), desc="pre-train"):
+    STEPS   = 10_000          # ← bump
+    ROLL    = 3               # ← predict 3 steps before teacher forcing
+
+    for step in tqdm(range(STEPS), desc="pre-train"):
         try: batch = next(iterator)
         except StopIteration:
             iterator = iter(loader); batch = next(iterator)
@@ -75,8 +76,8 @@ def load_model(device):
 
         # teacher forcing for t ≥ 1, rollout 1 step:
         online0 = model._teacher_force(s[:, :-ROLL], a[:, :-ROLL])
-        roll    = model(s[:, :1], a[:, :ROLL])        # predict 1 step
-        online  = torch.cat([roll, online0[:, 1:]], 1)
+        roll = model(s[:, :1], a[:, :ROLL])     # 3-step rollout
+        online = torch.cat([roll, online0[:, ROLL:]], 1)
 
         with torch.no_grad():
             tgt = model.target_encoder(s.flatten(0,1)).view_as(online)
