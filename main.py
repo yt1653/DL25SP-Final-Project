@@ -55,55 +55,16 @@ STEPS  = 10_000      # pre-train iterations
 LR     = 3e-4
 
 def load_model(device):
-    # ───────── 1. build tiny-JEPA ───────────────────────────────────
-    model = JEPAModel(
-        in_ch=2, act_dim=2,
-        state_dim=64, hidden_dim=64,
-        ema_tau=0.995, device=device,
-    )
-
-    # ───────── 2. data loader (exploration set) ─────────────────────
-    loader    = create_wall_dataloader(
-                    "/scratch/DL25SP/train",
-                    probing=False, device=device, train=True)
-    iterator  = iter(loader)
-    opt       = torch.optim.Adam(model.parameters(), LR)
-    model.train()
-
-    # ───────── 3. short VicReg pre-train loop ───────────────────────
-    for step in tqdm(range(STEPS), desc="pre-train"):
-        try:
-            batch = next(iterator)
-        except StopIteration:
-            iterator = iter(loader)
-            batch    = next(iterator)
-
-        s = batch.states.to(device)         # (B,T,C,H,W)
-        a = batch.actions.to(device)        # (B,T-1,2)
-
-        # teacher-forcing for t ≥ ROLL, rollout first ROLL steps
-        online_tf = model._teacher_force(s[:, :-ROLL], a[:, :-ROLL])
-        roll      = model(s[:, :1], a[:, :ROLL])           # ROLL-step rollout
-        online    = torch.cat([roll, online_tf[:, ROLL:]], 1)   # (B,T_out,4)
-
-        # -------- target encodings with SAME time length -------------
-        B, T_out, _ = online.shape                                    # ← EDIT
-        tgt = model.target_encoder(s[:, :T_out].flatten(0, 1))        # ← EDIT
-        tgt = tgt.view(B, T_out, -1).detach()                         # ← EDIT
-
-        loss = model.jepa_loss(online, tgt)
-        opt.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step()
-        model.update_target()
-
-        if step % 100 == 0:                         # print every 1 00 updates
-            print(f"[step {step:>5}] pre-train VicReg loss = {loss.item():.4f}",
-                flush=True)                        # flush to ensure it appears
-
-    model.eval()
+    model = JEPAModel(in_ch=2, act_dim=2,
+                      state_dim=64, hidden_dim=64,
+                      ema_tau=0.995, device=device)
+    try:
+        model.load_state_dict(torch.load("jepa.ckpt", map_location=device))
+        print("✓ loaded pretrained weights")
+    except FileNotFoundError:
+        print("jepa.ckpt not found – run `python train.py` first")
     return model
+
 
 
 def evaluate_model(device, model, probe_train_ds, probe_val_ds):
