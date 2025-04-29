@@ -110,8 +110,9 @@ def load_model(device):
         online = torch.cat([roll, tf[:, ROLL:]], 1)   # (B,T_out,64)
 
         B, T_out, _ = online.shape
-        tgt = model.target_encoder(s[:, :T_out].flatten(0,1)) \
-                    .view(B, T_out, -1).detach()
+        with torch.no_grad():
+            enc = model.target_encoder(s[:, :T_out].flatten(0,1))      # (B*T_out,32,16,16)
+            tgt = model._to_vec(enc).view(B, T_out, -1)                # (B,T_out,64)
 
         loss = model.jepa_loss(online, tgt)
 
