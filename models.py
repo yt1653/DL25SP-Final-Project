@@ -27,56 +27,38 @@ class SpatialEncoder(nn.Module):
         return self.conv(x)
 
 class ConvGRUPredictor(nn.Module):
-    def __init__(self, ch=32, act_dim=2, hidden_ch=32):
+    def __init__(self, ch=32, act_dim=2, hidden_ch=128):
         super().__init__()
         # project action to a 16×16 plane and concat to feature map
         self.act_proj = nn.Linear(act_dim, 16 * 16, bias=False)
         self.gru = nn.GRUCell(ch + 1, hidden_ch)          # +1 action plane
         self.out = nn.Conv2d(hidden_ch, ch, 1)
 
-    def step(self, feat, act):
-        B = feat.size(0)
-        act_plane = self.act_proj(act).view(B, 1, 16, 16)
-        x = torch.cat([feat, act_plane], 1)               # (B,33,16,16)
-        h = self.gru(x.flatten(2).transpose(1,2),         # (B,256,33)
-                     torch.zeros(B, self.gru.hidden_size,
-                                 device=feat.device))
-        h_map = h.transpose(1,2).view(B, self.gru.hidden_size, 16, 16)
-        return self.out(h_map)                            # (B,32,16,16)
 
     def forward(self, s0, actions):
         """
-        s0      : (B,32,16,16)  initial feature map from encoder
-        actions : (B,T,2)       Δx,Δy for each step
-        returns : (B,T,32,16,16)
+        s0      : (B,C,H,W)   encoded feature map
+        actions : (B,T,2)
+        → (B,T,C,H,W)
         """
         B, T, _ = actions.shape
-        h = torch.zeros(B, self.gru.hidden_size, device=s0.device)  # hidden state
+        h = torch.zeros(B, self.gru.hidden_size, device=s0.device)
         f = s0
         outs = []
         for t in range(T):
             act_plane = self.act_proj(actions[:, t]).view(B, 1, 16, 16)
-            x = torch.cat([f, act_plane], 1)            # (B,33,16,16)
-
-            # ---- convert spatial map to a 2-D vector (B,33) ----
-            z = x.flatten(2).mean(2)                    # (B,33)
-
-            # ---- recurrent update --------------------------------
-            h = self.gru(z, h)                          # (B,hidden)
-
-            # ---- broadcast hidden back to spatial map ------------
-            f = self.out(h.unsqueeze(-1).unsqueeze(-1)  # (B,hidden,1,1)
-                           .expand(-1, -1, 16, 16))     # (B,32,16,16)
-
+            x = torch.cat([f, act_plane], 1)              # (B,C+1,16,16)
+            z = x.flatten(2).mean(2)                     # (B,C+1) → GRU
+            h = self.gru(z, h)
+            f = self.out(h[:, :, None, None].expand(-1, -1, 16, 16))
             outs.append(f)
-
-        return torch.stack(outs, 1)                     # (B,T,32,16,16)
+        return torch.stack(outs, 1)                       # (B,T,C,H,W)
 
 #### JEPA model ####
 
 class JEPAModel(nn.Module):
     def __init__(self, in_ch=2, act_dim=2,
-                 ch=32, hidden_ch=32, repr_dim=64,
+                 ch=32, hidden_ch=128, repr_dim=64,
                  ema_tau=0.996, device="cpu"):
         super().__init__()
         self.device = torch.device(device)
@@ -115,12 +97,16 @@ class JEPAModel(nn.Module):
     def _to_vec(self, feat_map):                 # (B,32,16,16) → (B,D)
         return self.readout(feat_map)
 
-    def _teacher_force(self, states, actions):   # used in training
+    def _teacher_force(self, states, actions):
+        """
+        Predict every future latent, not just T-1 of them.
+        """
         B, T, *_ = states.shape
-        enc_all = self._encode(states.flatten(0,1)).view(B, T, -1, 16, 16)
-        preds = self.predictor(enc_all[:,0], actions)      # (B,T-1,32,16,16)
-        full = torch.cat([enc_all[:, :1], preds], 1)       # (B,T,32,16,16)
-        return self._to_vec(full.view(-1,32,16,16)).view(B, T, -1)
+        enc = self._encode(states.flatten(0,1)).view(B, T, -1, 16, 16)
+        preds = self.predictor(enc[:, 0], actions)           # (B,T-1,…)
+        full  = torch.cat([enc[:, :1], preds], 1)            # (B,T,…)
+        vecs  = self._to_vec(full.view(-1, 32, 16, 16))
+        return vecs.view(B, T, -1)
 
     @torch.no_grad()
     def _rollout(self, states, actions):         # evaluator inference
@@ -136,7 +122,7 @@ class JEPAModel(nn.Module):
         return self._teacher_force(states, actions)
 
     # ------------- VicReg loss ------------------------------------- #
-    def jepa_loss(self, online, target, λvar=25., λcov=1.):
+    def jepa_loss(self, online, target, λvar=1., λcov=0.1):
         mse = F.mse_loss(online, target)
 
         z = online.reshape(-1, online.size(-1))

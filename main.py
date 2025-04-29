@@ -56,8 +56,7 @@ def load_model(device):
 
     CKPT_FILE   = "jepa.ckpt"
     TRAIN_STEPS = 10_000
-    LR          = 3e-4
-    ROLL        = 3
+    LR          = 1e-4
     PRINT_EVERY = 800
 
     # ---------------------------------------------------------------
@@ -67,11 +66,10 @@ def load_model(device):
 
     # build tiny model
     model = JEPAModel(
-        in_ch=2,           # unchanged
-        act_dim=2,         # unchanged
-        ch=32,             # encoder + predictor channel width
-        hidden_ch=64,      # GRU hidden size   (was hidden_dim)
-        repr_dim=64,       # vector size fed to the prober (was state_dim)
+        in_ch=2, act_dim=2,
+        ch=48,          # try 48 or 64 if memory allows
+        hidden_ch=128,   # 128 for more capacity
+        repr_dim=64,
         ema_tau=0.995,
         device=device,
     )
@@ -105,14 +103,10 @@ def load_model(device):
         s = batch.states.to(device)
         a = batch.actions.to(device)
 
-        tf   = model._teacher_force(s[:, :-ROLL], a[:, :-ROLL])
-        roll = model(s[:, :1], a[:, :ROLL])
-        online = torch.cat([roll, tf[:, ROLL:]], 1)   # (B,T_out,64)
-
-        B, T_out, _ = online.shape
-        with torch.no_grad():
-            enc = model.target_encoder(s[:, :T_out].flatten(0,1))      # (B*T_out,32,16,16)
-            tgt = model._to_vec(enc).view(B, T_out, -1)                # (B,T_out,64)
+        online = model._teacher_force(s, a)                 # (B,T,64)
+        tgt     = model._to_vec(
+                model.target_encoder(s.flatten(0,1))
+            ).view_as(online).detach()                  # (B,T,64)
 
         loss = model.jepa_loss(online, tgt)
 
