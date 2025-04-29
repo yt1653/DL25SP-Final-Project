@@ -50,40 +50,52 @@ def load_data(device):
 
     return probe_train_ds, probe_val_ds
 
+ROLL   = 3           # rollout steps
+STEPS  = 10_000      # pre-train iterations
+LR     = 3e-4
 
 def load_model(device):
-    """Load or initialize the model."""
-    # TODO: Replace MockModel with your trained model
-    # model = MockModel()
-    model = JEPAModel(in_ch=2, act_dim=2, state_dim=64,
-                      hidden_dim=64, device=device, ema_tau=0.995)
+    # ───────── 1. build tiny-JEPA ───────────────────────────────────
+    model = JEPAModel(
+        in_ch=2, act_dim=2,
+        state_dim=64, hidden_dim=64,
+        ema_tau=0.995, device=device,
+    )
 
-    loader = create_wall_dataloader("/scratch/DL25SP/train",
-                                    probing=False, device=device, train=True)
-    opt = torch.optim.Adam(model.parameters(), 3e-4)
-    iterator = iter(loader)
+    # ───────── 2. data loader (exploration set) ─────────────────────
+    loader    = create_wall_dataloader(
+                    "/scratch/DL25SP/train",
+                    probing=False, device=device, train=True)
+    iterator  = iter(loader)
+    opt       = torch.optim.Adam(model.parameters(), LR)
     model.train()
 
-    STEPS   = 10_000          # ← bump
-    ROLL    = 3               # ← predict 3 steps before teacher forcing
-
+    # ───────── 3. short VicReg pre-train loop ───────────────────────
     for step in tqdm(range(STEPS), desc="pre-train"):
-        try: batch = next(iterator)
+        try:
+            batch = next(iterator)
         except StopIteration:
-            iterator = iter(loader); batch = next(iterator)
+            iterator = iter(loader)
+            batch    = next(iterator)
 
-        s, a = batch.states.to(device), batch.actions.to(device)
+        s = batch.states.to(device)         # (B,T,C,H,W)
+        a = batch.actions.to(device)        # (B,T-1,2)
 
-        # teacher forcing for t ≥ 1, rollout 1 step:
-        online0 = model._teacher_force(s[:, :-ROLL], a[:, :-ROLL])
-        roll = model(s[:, :1], a[:, :ROLL])     # 3-step rollout
-        online = torch.cat([roll, online0[:, ROLL:]], 1)
+        # teacher-forcing for t ≥ ROLL, rollout first ROLL steps
+        online_tf = model._teacher_force(s[:, :-ROLL], a[:, :-ROLL])
+        roll      = model(s[:, :1], a[:, :ROLL])           # ROLL-step rollout
+        online    = torch.cat([roll, online_tf[:, ROLL:]], 1)   # (B,T_out,4)
 
-        with torch.no_grad():
-            tgt = model.target_encoder(s.flatten(0,1)).view_as(online)
+        # -------- target encodings with SAME time length -------------
+        B, T_out, _ = online.shape                                    # ← EDIT
+        tgt = model.target_encoder(s[:, :T_out].flatten(0, 1))        # ← EDIT
+        tgt = tgt.view(B, T_out, -1).detach()                         # ← EDIT
 
         loss = model.jepa_loss(online, tgt)
-        opt.zero_grad(); loss.backward(); opt.step()
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        opt.step()
         model.update_target()
 
     model.eval()
