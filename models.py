@@ -43,13 +43,15 @@ class ConvEncoder(nn.Module):
         # soft-argmax for position
         heat = f.mean(1)                  # (B,33,33)
         p = heat.flatten(1).softmax(-1).view_as(heat)
-        x_cm = (p * self.xx).sum((1,2))
-        y_cm = (p * self.yy).sum((1,2))
+        x_cm = (p * self.xx).sum((1, 2))
+        y_cm = (p * self.yy).sum((1, 2))
         # take deepest feature vec at peak to estimate velocity
         idx = p.flatten(1).argmax(-1)                    # (B,)
         feats = f.flatten(2).transpose(1,2)              # (B, 33*33, 32)
         v = self.head_v(feats[torch.arange(len(x)), idx])# (B,2)
-        return torch.cat([x_cm, y_cm, v], -1)            # (B,4)
+        return torch.cat([x_cm.unsqueeze(1),          # (B,1)
+                          y_cm.unsqueeze(1),          # (B,1)
+                          v], dim=-1)                 # (B,4)
 
     
 
