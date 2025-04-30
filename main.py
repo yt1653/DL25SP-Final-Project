@@ -55,7 +55,7 @@ def load_model(device):
     from dataset import create_wall_dataloader
 
     CKPT_FILE   = "jepa_spatial.ckpt"
-    TRAIN_STEPS = 120_000
+    TRAIN_STEPS = 20_000
     LR          = 3e-4
     PRINT_EVERY = 1000
 
