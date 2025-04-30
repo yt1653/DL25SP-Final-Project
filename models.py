@@ -22,7 +22,8 @@ class SpatialEncoder(nn.Module):
             nn.Conv2d(64, ch, 3, 1, 1), nn.ReLU(True),
         )
 
-    def forward(self, x):               # (B,2,64,64) → (B,64,64,64)
+    def forward(self, x):
+        x = F.interpolate(x, size=(64, 64), mode="nearest")   # <── ADD
         return self.conv(x)
 
 class ConvGRUPredictor(nn.Module):
