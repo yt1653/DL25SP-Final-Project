@@ -54,10 +54,10 @@ def load_model(device):
     from models import JEPAModel
     from dataset import create_wall_dataloader
 
-    CKPT_FILE   = "jepa.ckpt"
-    TRAIN_STEPS = 10_000
-    LR          = 1e-4
-    PRINT_EVERY = 800
+    CKPT_FILE   = "jepa_spatial.ckpt"
+    TRAIN_STEPS = 120_000
+    LR          = 3e-4
+    PRINT_EVERY = 1000
 
     # ---------------------------------------------------------------
     def cosine_tau(step, total, base=0.996, final=0.9995):
@@ -67,9 +67,9 @@ def load_model(device):
     # build tiny model
     model = JEPAModel(
         in_ch=2, act_dim=2,
-        ch=48,          # try 48 or 64 if memory allows
+        ch=64,          # try 48 or 64 if memory allows
         hidden_ch=128,   # 128 for more capacity
-        repr_dim=64,
+        repr_dim=66,
         ema_tau=0.995,
         device=device,
     )
@@ -103,12 +103,9 @@ def load_model(device):
         s = batch.states.to(device)
         a = batch.actions.to(device)
 
-        online = model._teacher_force(s, a)                 # (B,T,64)
-        tgt     = model._to_vec(
-                model.target_encoder(s.flatten(0,1))
-            ).view_as(online).detach()                  # (B,T,64)
-
-        loss = model.jepa_loss(online, tgt)
+        online_fm = model._teacher_force(s, a, return_maps=True)     # (B,T,C,64,64)
+        tgt_fm    = model.target_encoder(s.flatten(0,1)).view_as(online_fm).detach()
+        loss      = model.jepa_loss(online_fm, tgt_fm)
 
         opt.zero_grad()
         loss.backward()

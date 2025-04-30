@@ -14,45 +14,35 @@ def build_mlp(layers_dims: List[int]):
     return nn.Sequential(*layers)
 
 class SpatialEncoder(nn.Module):
-    def __init__(self, in_ch=2, out_ch=32):
+    def __init__(self, in_ch=2, ch=64):
         super().__init__()
-        self.conv = nn.Sequential(               # 65 → 33 → 17 → 16
-            nn.Conv2d(in_ch, 16, 5, 2, 2), nn.ReLU(True),  # 65→33
-            nn.Conv2d(16, 32, 3, 2, 1), nn.ReLU(True),     # 33→17
-            nn.Conv2d(32, out_ch, 3, 1, 0), nn.ReLU(True), # 17→15
-            nn.ZeroPad2d((0,1,0,1)),                      # 15→16 (square)
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, 32, 3, 1, 1), nn.ReLU(True),
+            nn.Conv2d(32, 64, 3, 1, 1), nn.ReLU(True),
+            nn.Conv2d(64, ch, 3, 1, 1), nn.ReLU(True),
         )
 
-    def forward(self, x):            # (B,C,H,W) → (B,32,16,16)
+    def forward(self, x):               # (B,2,64,64) → (B,64,64,64)
         return self.conv(x)
 
 class ConvGRUPredictor(nn.Module):
-    def __init__(self, ch=32, act_dim=2, hidden_ch=128):
+    def __init__(self, ch=64, act_dim=2, hidden_ch=128):
         super().__init__()
-        # project action to a 16×16 plane and concat to feature map
-        self.act_proj = nn.Linear(act_dim, 16 * 16, bias=False)
-        self.gru = nn.GRUCell(ch + 1, hidden_ch)          # +1 action plane
-        self.out = nn.Conv2d(hidden_ch, ch, 1)
+        self.act2flow = nn.Linear(act_dim, 2)            # (dx,dy)→flow
+        self.gru = nn.GRUCell(ch + 2, hidden_ch)
+        self.out = nn.Conv2d(hidden_ch, ch, 3, padding=1)
 
-
-    def forward(self, s0, actions):
-        """
-        s0      : (B,C,H,W)   encoded feature map
-        actions : (B,T,2)
-        → (B,T,C,H,W)
-        """
-        B, T, _ = actions.shape
-        h = torch.zeros(B, self.gru.hidden_size, device=s0.device)
-        f = s0
-        outs = []
+    def forward(self, f0, actions):                      # f0 (B,C,H,W)
+        B, T, _ = actions.shape; H = W = f0.size(-1)
+        h = torch.zeros(B, self.gru.hidden_size, device=f0.device)
+        feats, f = [], f0
         for t in range(T):
-            act_plane = self.act_proj(actions[:, t]).view(B, 1, 16, 16)
-            x = torch.cat([f, act_plane], 1)              # (B,C+1,16,16)
-            z = x.flatten(2).mean(2)                     # (B,C+1) → GRU
-            h = self.gru(z, h)
-            f = self.out(h[:, :, None, None].expand(-1, -1, 16, 16))
-            outs.append(f)
-        return torch.stack(outs, 1)                       # (B,T,C,H,W)
+            flow = self.act2flow(actions[:, t]).view(B, 2, 1, 1).expand(-1, -1, H, W)
+            z = torch.cat([f, flow], 1)                  # (B,C+2,H,W)
+            h = self.gru(z.flatten(2).mean(-1), h)
+            f = self.out(h[:, :, None, None].expand(-1, -1, H, W))
+            feats.append(f)
+        return torch.stack(feats, 1)                     # (B,T,C,H,W)
 
 #### JEPA model ####
 
@@ -67,12 +57,8 @@ class JEPAModel(nn.Module):
         self.target_encoder = SpatialEncoder(in_ch, ch).to(self.device)
         self.predictor = ConvGRUPredictor(ch, act_dim, hidden_ch).to(self.device)
 
-        # compress spatial map to vector for evaluator / prober
-        self.readout = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1), nn.Flatten(),
-            nn.Linear(ch, repr_dim),
-        ).to(self.device)
-        self.repr_dim = repr_dim
+        self.soft_T   = nn.Parameter(torch.tensor(0.0))   # log-temperature
+        self.repr_dim = self.ch + 2                       # 64 + 2 = 66
 
         self._ema_tau = ema_tau
         self._sync_target()
@@ -95,27 +81,56 @@ class JEPAModel(nn.Module):
     def _encode(self, frames):
         return self.encoder(frames)
 
-    def _to_vec(self, feat_map):                 # (B,32,16,16) → (B,D)
-        return self.readout(feat_map)
+    def _to_vec(self, fm):                               # (B,C,H,W)
+        B,C,H,W = fm.shape
+        yy, xx = torch.meshgrid(
+            torch.linspace(-1, 1, H, device=fm.device),
+            torch.linspace(-1, 1, W, device=fm.device),
+            indexing="ij")
+        coords = torch.stack([xx, yy], 0)                # (2,H,W)
 
-    def _teacher_force(self, states, actions):
+        T = self.soft_T.exp()                            # learned log-T
+        w = F.softmax(fm.mean(1) / T, dim=(-2,-1))       # (B,H,W)
+        mu = (w.unsqueeze(1) * coords).flatten(2).sum(-1)     # (B,2)
+
+        g = F.adaptive_avg_pool2d(fm, 1).flatten(1)      # (B,C)
+        return torch.cat([mu, g], 1)                     # (B, C+2)
+
+    def _teacher_force(self, states, actions, *, return_maps=False):
         """
-        Predict every future latent, not just T-1 of them.
+        Encode every frame, then predict the next (T-1) feature maps with the
+        Conv-GRU, finally return either the full map sequence (B,T,C,64,64) or
+        the usual latent vectors (B,T,D).
         """
-        B, T, *_ = states.shape
-        enc = self._encode(states.flatten(0,1)).view(B, T, -1, 16, 16)
-        preds = self.predictor(enc[:, 0], actions)           # (B,T-1,…)
-        full  = torch.cat([enc[:, :1], preds], 1)            # (B,T,…)
-        vecs  = self._to_vec(full.view(-1, self.ch, 16, 16))
-        return vecs.view(B, T, -1)
+        B, T, *_ = states.shape                       # states: (B,T,2,64,64)
+
+        # encode each frame, then reshape to (B,T,C,64,64)
+        enc = self._encode(states.flatten(0, 1)).view(B, T, self.ch, 64, 64)
+
+        preds = self.predictor(enc[:, 0], actions)    # (B,T-1,C,64,64)
+        full  = torch.cat([enc[:, :1], preds], 1)     # (B,T,C,64,64)
+
+        if return_maps:
+            return full                               # ----- maps for loss -----
+
+        # convert each map to a (C+2)-d vector
+        vecs = self._to_vec(full.flatten(0,1)         # (B·T,C+2)
+                        ).view(B, T, -1)           # (B,T,D)
+        return vecs
+
 
     @torch.no_grad()
-    def _rollout(self, states, actions):         # evaluator inference
+    def _rollout(self, states, actions):
+        """Inference path used by the evaluator (states has length 1)."""
         B = states.size(0)
-        f0 = self._encode(states[:,0])
-        preds = self.predictor(f0, actions)      # (B,T,32,16,16)
-        full = torch.cat([f0.unsqueeze(1), preds], 1)      # (B,T+1,32,16,16)
-        return self._to_vec(full.view(-1,self.ch,16,16)).view(B, -1, self.repr_dim)
+
+        f0    = self._encode(states[:, 0])            # (B,C,64,64)
+        preds = self.predictor(f0, actions)           # (B,T,C,64,64)
+        full  = torch.cat([f0.unsqueeze(1), preds], 1)   # (B,T+1,C,64,64)
+
+        vecs = self._to_vec(full.flatten(0,1))        # (B·(T+1),C+2)
+        return vecs.view(B, -1, self.repr_dim)        # (B,T+1,D)
+
 
     def forward(self, states, actions):
         if states.size(1) == 1:      # inference
@@ -123,18 +138,24 @@ class JEPAModel(nn.Module):
         return self._teacher_force(states, actions)
 
     # ------------- VicReg loss ------------------------------------- #
-    def jepa_loss(self, online, target, λvar=1., λcov=0.1):
-        mse = F.mse_loss(online, target)
+    def jepa_loss(self, online_fm, target_fm,
+                  λpix=1.0, λvar=1., λcov=0.1):
+        B,T,C,H,W = online_fm.shape
+        pix = F.mse_loss(online_fm, target_fm)
 
-        z = online.reshape(-1, online.size(-1))
-        std = torch.sqrt(z.var(0) + 1e-4)
-        var_loss = torch.clamp(1.-std, min=0).mean()
+        o = online_fm.flatten(0,1).mean([-1,-2])
+        t = target_fm.flatten(0,1).mean([-1,-2])
+        mse = F.mse_loss(o, t)
 
-        zc = z - z.mean(0)
-        cov = (zc.T @ zc)/(z.shape[0]-1)
-        off = cov.flatten()[1:].view(z.size(1)-1, z.size(1)+1)[:,:-1]
-        cov_loss = (off**2).mean()
-        return mse + λvar*var_loss + λcov*cov_loss
+        std = torch.sqrt(o.var(0) + 1e-4)
+        var = torch.clamp(1.-std, 0).mean()
+
+        zc = o - o.mean(0)
+        cov = (zc.T @ zc) / (o.size(0)-1)
+        off = cov.flatten()[1:].view(C-1, C+1)[:, :-1]
+        cov = (off**2).mean()
+
+        return λpix*pix + mse + λvar*var + λcov*cov
 
 
 class MockModel(torch.nn.Module):
