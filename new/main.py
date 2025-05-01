@@ -19,6 +19,7 @@ def set_seed(seed=1126):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.use_deterministic_algorithms(True)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
 
 # Call at very beginning of main.py
 set_seed(1126)
